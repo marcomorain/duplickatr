@@ -3,6 +3,7 @@ require 'flickraw-cached'
 require 'active_support'
 require 'net/http'
 require 'open-uri'
+require 'digest/sha1'
 
 api_key       = ENV['FLICKR_API_KEY']
 secret_key    = ENV['FLICKR_SEC_KEY']
@@ -38,26 +39,39 @@ else
   end
 end
 
-per_page = 3
-
+per_page = 100
 count = 0
-for page in 1..1 do
+
+all_photos = []
+for page in 1..500 do
   photos = flickr.people.getPhotos(:user_id  => login.id,
                                    :extras   => 'tags,machine_tags,url_o',
                                    :page     => page,
                                    :per_page => per_page)
   break if photos.size == 0
 
+  puts("Downloaded data for #{photos.size} photos")
+
   photos.each do |p|
-    puts p.inspect
+    #puts p.inspect
+    hashes = p.machine_tags.split.select { |tag| tag.start_with? 'hash:sha1' }
 
-    File.open("tmp/#{p.id}.jpg", 'wb') do |saved_file|
-      open(p.url_o, 'rb') do |read_file|
-      saved_file.write(read_file.read)
+    if hashes.empty?
+      all_photos << p
+    else
+      puts(hashes)
     end
-  end
-
   end
   count += photos.size
 end
-puts("Total: #{count}")
+puts("Total: #{count} To process: #{all_photos.count}")
+
+all_photos.each do |p|
+  puts("Downloading #{p.url_o}")
+  open(p.url_o, 'rb') do |read_file|
+    hash = Digest::SHA1.hexdigest(read_file.read)
+    flickr.photos.addTags(:photo_id => p.id, :tags => "hash:sha1=#{hash}")
+    puts("Setting hash tag to #{p.id} as #{hash}")
+  end
+end
+
