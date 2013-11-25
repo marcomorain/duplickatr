@@ -1,10 +1,13 @@
-require 'flickraw'
+#require 'flickraw'
+require 'flickraw-cached'
+require 'active_support'
+require 'net/http'
+require 'open-uri'
 
-api_key    = '077eac1e7e41542df52529f8b749aaf2'
-secret_key = '27eea421ceed4826'
-
-access_token  = '72157638015506525-8e3b1e31d58969c9'
-access_secret = '58af0996c4ea7798'
+api_key       = ENV['FLICKR_API_KEY']
+secret_key    = ENV['FLICKR_SEC_KEY']
+access_token  = ENV['FLICKR_ACCESS_TOKEN']
+access_secret = ENV['FLICKR_ACCESS_SECRET']
 
 FlickRaw.api_key       = api_key
 FlickRaw.shared_secret = secret_key
@@ -35,4 +38,26 @@ else
   end
 end
 
-puts flickr.people.getPhotos(:user_id => login.id, :api_key => api_key).first
+per_page = 3
+
+count = 0
+for page in 1..1 do
+  photos = flickr.people.getPhotos(:user_id  => login.id,
+                                   :extras   => 'tags,machine_tags,url_o',
+                                   :page     => page,
+                                   :per_page => per_page)
+  break if photos.size == 0
+
+  photos.each do |p|
+    puts p.inspect
+
+    File.open("tmp/#{p.id}.jpg", 'wb') do |saved_file|
+      open(p.url_o, 'rb') do |read_file|
+      saved_file.write(read_file.read)
+    end
+  end
+
+  end
+  count += photos.size
+end
+puts("Total: #{count}")
