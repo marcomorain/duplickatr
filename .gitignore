@@ -1,3 +1,4 @@
+.DS_Store
 *.gem
 *.rbc
 .bundle
@@ -11,7 +12,7 @@ spec/reports
 test/tmp
 test/version_tmp
 tmp
-
+env.sh
 # YARD artifacts
 .yardoc
 _yardoc
