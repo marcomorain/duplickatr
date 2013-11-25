@@ -4,6 +4,8 @@ require 'active_support'
 require 'net/http'
 require 'open-uri'
 require 'digest/sha1'
+require 'work_queue'
+require 'thread'
 
 api_key       = ENV['FLICKR_API_KEY']
 secret_key    = ENV['FLICKR_SEC_KEY']
@@ -39,39 +41,53 @@ else
   end
 end
 
-per_page = 100
+per_page = 500
 count = 0
+queued = 0
 
-all_photos = []
+semaphore = Mutex.new
+queue     = WorkQueue.new(64)
+
+DownloadJob = Struct.new(:semaphore, :queue, :photo, :url) do
+  def download
+    open(url, 'rb') do |read_file|
+      hash = Digest::SHA1.hexdigest(read_file.read)
+      tags = "hash:sha1=#{hash}"
+      semaphore.synchronize do
+        flickr.photos.addTags(:photo_id => photo,
+                              :tags     => tags)
+      end
+      print("#{queue.cur_tasks} jobs remain on queue. Done #{url} as #{hash}\r")
+    end
+  end
+end
+
 for page in 1..500 do
-  photos = flickr.people.getPhotos(:user_id  => login.id,
-                                   :extras   => 'tags,machine_tags,url_o',
-                                   :page     => page,
-                                   :per_page => per_page)
+
+  puts("Downloading photo metadata from #{per_page * (page-1)} to #{page * per_page}")
+
+  photos = semaphore.synchronize do
+    flickr.people.getPhotos(:user_id  => login.id,
+                            :extras   => 'tags,machine_tags,url_o',
+                            :page     => page,
+                            :per_page => per_page)
+  end
   break if photos.size == 0
 
   puts("Downloaded data for #{photos.size} photos")
 
   photos.each do |p|
-    #puts p.inspect
     hashes = p.machine_tags.split.select { |tag| tag.start_with? 'hash:sha1' }
-
     if hashes.empty?
-      all_photos << p
-    else
-      puts(hashes)
+      queued = queued + 1
+      photo = p.id
+      url   = p.url_o
+      job   = DownloadJob.new(semaphore, queue, photo, url)
+      queue.enqueue_b { job.download }
     end
   end
   count += photos.size
 end
-puts("Total: #{count} To process: #{all_photos.count}")
+puts("Total: #{count} to process: #{queued}")
 
-all_photos.each do |p|
-  puts("Downloading #{p.url_o}")
-  open(p.url_o, 'rb') do |read_file|
-    hash = Digest::SHA1.hexdigest(read_file.read)
-    flickr.photos.addTags(:photo_id => p.id, :tags => "hash:sha1=#{hash}")
-    puts("Setting hash tag to #{p.id} as #{hash}")
-  end
-end
-
+queue.join
