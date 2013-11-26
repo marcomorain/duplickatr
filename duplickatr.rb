@@ -1,21 +1,32 @@
-#require 'flickraw'
-require 'flickraw-cached'
+#!/usr/bin/env ruby
+require 'flickraw'
 require 'active_support'
-require 'net/http'
-require 'open-uri'
 require 'digest/sha1'
 require 'work_queue'
 require 'thread'
 require 'leveldb'
+require 'pathname'
+require 'open-uri'
 
+per_page = 100
+count    = 0
+queued   = 0
 
-api_key       = ENV['FLICKR_API_KEY']
-secret_key    = ENV['FLICKR_SEC_KEY']
-access_token  = ENV['FLICKR_ACCESS_TOKEN']
-access_secret = ENV['FLICKR_ACCESS_SECRET']
+semaphore       = Mutex.new
+queue           = WorkQueue.new(64)
+db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
+sha_tag         = /hash:sha1=(\h{40})/
+min_upload_date = db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
+started_at      = Time.now.to_i
+
+api_key       = '077eac1e7e41542df52529f8b749aaf2'
+secret_key    = '27eea421ceed4826'
+access_token  = db['meta:access_token']
+access_secret = db['meta:access_secret']
 
 FlickRaw.api_key       = api_key
 FlickRaw.shared_secret = secret_key
+
 
 login = {}
 
@@ -37,22 +48,14 @@ else
 
     flickr.get_access_token(token['oauth_token'], token['oauth_token_secret'], verify)
     login = flickr.test.login
+
+    db['meta:access_token']  = flickr.access_token
+    db['meta:access_secret'] = flickr.access_secret
     puts "You are now authenticated as #{login.username} with token #{flickr.access_token} and secret #{flickr.access_secret}"
   rescue FlickRaw::FailedResponse => e
     puts "Authentication failed : #{e.msg}"
   end
 end
-
-per_page = 100
-count    = 0
-queued   = 0
-
-semaphore       = Mutex.new
-queue           = WorkQueue.new(64)
-db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
-sha_tag         = /hash:sha1=(\h{40})/
-min_upload_date = db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
-started_at      = Time.now.to_i
 
 puts("Starting downloads from #{Time.at(min_upload_date.to_i)}")
 
@@ -72,17 +75,31 @@ Photo = Struct.new(:id, :url, :hash) do
   end
 end
 
+
+def sha1_digest_of(content)
+  Digest::SHA1.hexdigest(content)
+end
+
 DownloadJob = Struct.new(:semaphore, :queue, :db, :photo) do
   def download
-    open(photo.url, 'rb') do |read_file|
-      photo.hash = Digest::SHA1.hexdigest(read_file.read)
+    begin
+      photo.hash = sha1_digest_of(open(photo.url).read)
       semaphore.synchronize do
         flickr.photos.addTags(:photo_id => photo.id,
                               :tags     => photo.hash_tag)
         photo.store_metadata_in(db)
       end
       print("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}\r")
+    rescue Exception => e
+      puts(e)
+      puts(e.backtrace.join("\n"))
     end
+  end
+end
+
+UploadJob = Struct.new(:semaphore, :queue, :db, :photo) do
+  def upload
+    print("Upload job for #{photo}\r")
   end
 end
 
@@ -104,9 +121,10 @@ for page in 1..500 do
   photos.each do |p|
     hashes = p.machine_tags.split.map { |tag| sha_tag.match(tag) }
     if hashes.empty?
+      puts(p.id)
       queued = queued + 1
       photo  = Photo.new(p.id, p.url_o, '')
-      job    = DownloadJob.new(semaphore, queue, photo)
+      job    = DownloadJob.new(semaphore, queue, db, photo)
       queue.enqueue_b { job.download }
     else
       photo = Photo.new(p.id, p.url_o, hashes.first[1] )
@@ -120,5 +138,27 @@ puts("Total: #{count} to process: #{queued}")
 queue.join
 db['meta:min_upload_date'] = started_at
 puts("Complete. Download will start at #{Time.at(started_at)} next time")
+
+
+count = 0
+File.open('/Users/marc/photo_list.txt', 'r').each_line do |line|
+  line = line.strip
+  hash = sha1_digest_of(File.read(line))
+
+  existing = db["photo:sha1:#{hash}"]
+
+  if existing.nil?
+    job = UploadJob.new(semaphore, queue, db, line)
+    queue.enqueue_b { job.upload }
+    count = count + 1
+  end
+
+end
+
+
+puts("#{count} upload jobs pending")
+queue.join
+
+
 
 
