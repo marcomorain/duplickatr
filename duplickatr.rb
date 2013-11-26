@@ -6,6 +6,8 @@ require 'open-uri'
 require 'digest/sha1'
 require 'work_queue'
 require 'thread'
+require 'leveldb'
+
 
 api_key       = ENV['FLICKR_API_KEY']
 secret_key    = ENV['FLICKR_SEC_KEY']
@@ -41,23 +43,45 @@ else
   end
 end
 
-per_page = 500
-count = 0
-queued = 0
+per_page = 100
+count    = 0
+queued   = 0
 
-semaphore = Mutex.new
-queue     = WorkQueue.new(64)
+semaphore       = Mutex.new
+queue           = WorkQueue.new(64)
+db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
+sha_tag         = /hash:sha1=(\h{40})/
+min_upload_date = db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
+started_at      = Time.now.to_i
 
-DownloadJob = Struct.new(:semaphore, :queue, :photo, :url) do
+puts("Starting downloads from #{Time.at(min_upload_date.to_i)}")
+
+
+Photo = Struct.new(:id, :url, :hash) do
+  def to_h
+    Hash[each_pair.to_a]
+  end
+
+  def hash_tag
+    raise 'Unknown SHA1' if hash.empty?
+    "hash:sha1=#{hash}"
+  end
+
+  def store_metadata_in(db)
+    db["photo:sha1:#{hash}"] = db["photo:id:#{id}"] = to_h
+  end
+end
+
+DownloadJob = Struct.new(:semaphore, :queue, :db, :photo) do
   def download
-    open(url, 'rb') do |read_file|
-      hash = Digest::SHA1.hexdigest(read_file.read)
-      tags = "hash:sha1=#{hash}"
+    open(photo.url, 'rb') do |read_file|
+      photo.hash = Digest::SHA1.hexdigest(read_file.read)
       semaphore.synchronize do
-        flickr.photos.addTags(:photo_id => photo,
-                              :tags     => tags)
+        flickr.photos.addTags(:photo_id => photo.id,
+                              :tags     => photo.hash_tag)
+        photo.store_metadata_in(db)
       end
-      print("#{queue.cur_tasks} jobs remain on queue. Done #{url} as #{hash}\r")
+      print("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}\r")
     end
   end
 end
@@ -67,23 +91,26 @@ for page in 1..500 do
   puts("Downloading photo metadata from #{per_page * (page-1)} to #{page * per_page}")
 
   photos = semaphore.synchronize do
-    flickr.people.getPhotos(:user_id  => login.id,
-                            :extras   => 'tags,machine_tags,url_o',
-                            :page     => page,
-                            :per_page => per_page)
+    flickr.people.getPhotos(:user_id         => login.id,
+                            :extras          => 'tags,machine_tags,url_o',
+                            :page            => page,
+                            :per_page        => per_page,
+                            :min_upload_date => min_upload_date)
   end
   break if photos.size == 0
 
   puts("Downloaded data for #{photos.size} photos")
 
   photos.each do |p|
-    hashes = p.machine_tags.split.select { |tag| tag.start_with? 'hash:sha1' }
+    hashes = p.machine_tags.split.map { |tag| sha_tag.match(tag) }
     if hashes.empty?
       queued = queued + 1
-      photo = p.id
-      url   = p.url_o
-      job   = DownloadJob.new(semaphore, queue, photo, url)
+      photo  = Photo.new(p.id, p.url_o, '')
+      job    = DownloadJob.new(semaphore, queue, photo)
       queue.enqueue_b { job.download }
+    else
+      photo = Photo.new(p.id, p.url_o, hashes.first[1] )
+      semaphore.synchronize { photo.store_metadata_in(db) }
     end
   end
   count += photos.size
@@ -91,3 +118,7 @@ end
 puts("Total: #{count} to process: #{queued}")
 
 queue.join
+db['meta:min_upload_date'] = started_at
+puts("Complete. Download will start at #{Time.at(started_at)} next time")
+
+
