@@ -7,6 +7,7 @@ require 'thread'
 require 'leveldb'
 require 'pathname'
 require 'open-uri'
+require 'find'
 
 per_page = 100
 count    = 0
@@ -51,7 +52,8 @@ else
 
     db['meta:access_token']  = flickr.access_token
     db['meta:access_secret'] = flickr.access_secret
-    puts "You are now authenticated as #{login.username} with token #{flickr.access_token} and secret #{flickr.access_secret}"
+    puts "You are now authenticated as #{login.username} with token " +
+      "#{flickr.access_token} and secret #{flickr.access_secret}"
   rescue FlickRaw::FailedResponse => e
     puts "Authentication failed : #{e.msg}"
   end
@@ -59,6 +61,10 @@ end
 
 puts("Starting downloads from #{Time.at(min_upload_date.to_i)}")
 
+def make_hash_tag(hash)
+  raise 'Unknown SHA1' if hash.empty?
+  "hash:sha1=#{hash}"
+end
 
 Photo = Struct.new(:id, :url, :hash) do
   def to_h
@@ -66,8 +72,7 @@ Photo = Struct.new(:id, :url, :hash) do
   end
 
   def hash_tag
-    raise 'Unknown SHA1' if hash.empty?
-    "hash:sha1=#{hash}"
+    make_hash_tag(hash)
   end
 
   def store_metadata_in(db)
@@ -89,7 +94,7 @@ DownloadJob = Struct.new(:semaphore, :queue, :db, :photo) do
                               :tags     => photo.hash_tag)
         photo.store_metadata_in(db)
       end
-      print("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}\r")
+      puts("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}")
     rescue Exception => e
       puts(e)
       puts(e.backtrace.join("\n"))
@@ -97,9 +102,13 @@ DownloadJob = Struct.new(:semaphore, :queue, :db, :photo) do
   end
 end
 
-UploadJob = Struct.new(:semaphore, :queue, :db, :photo) do
+UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
   def upload
-    print("Upload job for #{photo}\r")
+    flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
+                                :is_public => 0,
+                                :is_friend => 0,
+                                :is_family => 1)
+    puts("#{hash} uploaded #{queue.cur_tasks} jobs remain on the queue")
   end
 end
 
@@ -127,7 +136,7 @@ for page in 1..500 do
       job    = DownloadJob.new(semaphore, queue, db, photo)
       queue.enqueue_b { job.download }
     else
-      photo = Photo.new(p.id, p.url_o, hashes.first[1] )
+      photo = Photo.new(p.id, p.url_o, hashes.first[1])
       semaphore.synchronize { photo.store_metadata_in(db) }
     end
   end
@@ -139,22 +148,26 @@ queue.join
 db['meta:min_upload_date'] = started_at
 puts("Complete. Download will start at #{Time.at(started_at)} next time")
 
-
+iphoto_masters = '/Users/marcomorain/Pictures/iPhoto Library/Masters/'
 count = 0
-File.open('/Users/marc/photo_list.txt', 'r').each_line do |line|
-  line = line.strip
-  hash = sha1_digest_of(File.read(line))
 
+puts("Scanning iPhoto directory")
+files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
+puts("Scan complete")
+
+files.each do |path|
+  hash = sha1_digest_of(File.read(path))
+  puts("Local image file: #{path} hash: #{hash}")
   existing = db["photo:sha1:#{hash}"]
 
   if existing.nil?
-    job = UploadJob.new(semaphore, queue, db, line)
+    job = UploadJob.new(semaphore, queue, db, path, hash)
     queue.enqueue_b { job.upload }
     count = count + 1
+  else
+    #puts("Found exiting tag for #{hash} - not uploading")
   end
-
 end
-
 
 puts("#{count} upload jobs pending")
 queue.join
