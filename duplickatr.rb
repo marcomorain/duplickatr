@@ -136,8 +136,14 @@ for page in 1..500 do
       job    = DownloadJob.new(semaphore, queue, db, photo)
       queue.enqueue_b { job.download }
     else
-      photo = Photo.new(p.id, p.url_o, hashes.first[1])
-      semaphore.synchronize { photo.store_metadata_in(db) }
+      begin
+        photo = Photo.new(p.id, p.url_o, hashes.first[1])
+        semaphore.synchronize { photo.store_metadata_in(db) }
+     rescue Exception => e
+        puts('Something odd is up with this photo:')
+        puts(e)
+        puts(p)
+     end
     end
   end
   count += photos.size
@@ -148,28 +154,35 @@ queue.join
 db['meta:min_upload_date'] = started_at
 puts("Complete. Download will start at #{Time.at(started_at)} next time")
 
-iphoto_masters = '/Users/marcomorain/Pictures/iPhoto Library/Masters/'
+
+iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
+puts(iphoto_masters)
 count = 0
 
 puts("Scanning iPhoto directory")
 files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
 puts("Scan complete")
 
-files.each do |path|
-  hash = sha1_digest_of(File.read(path))
-  puts("Local image file: #{path} hash: #{hash}")
-  existing = db["photo:sha1:#{hash}"]
 
-  if existing.nil?
-    job = UploadJob.new(semaphore, queue, db, path, hash)
-    queue.enqueue_b { job.upload }
-    count = count + 1
-  else
-    #puts("Found exiting tag for #{hash} - not uploading")
+max_files_per_job = 512
+
+files.each_slice(max_files_per_job).each do |file_set|
+  queue.enqueue_b do
+    file_set.each do |path|
+      hash = sha1_digest_of(File.read(path))
+      puts("Local image file: #{path} hash: #{hash}")
+      existing = db["photo:sha1:#{hash}"]
+
+      if existing.nil?
+        job = UploadJob.new(semaphore, queue, db, path, hash)
+        queue.enqueue_b { job.upload }
+      else
+        #puts("Found exiting tag for #{hash} - not uploading")
+      end
+    end
   end
 end
 
-puts("#{count} upload jobs pending")
 queue.join
 
 
