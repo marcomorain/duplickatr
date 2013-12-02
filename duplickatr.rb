@@ -12,7 +12,7 @@ require 'filesize'
 require 'ruby-progressbar'
 require 'thor'
 
-PER_PAGE = 100
+PER_PAGE = 500
 jobs     = 0
 queued   = 0
 
@@ -21,12 +21,12 @@ class SafeProgressBar
     @lock = Mutex.new
     @bar  = ProgressBar.create(:format => '%a %B %p%% %t')
 
-    Thread.new do
-      while true do
-        @log.synchronize { @bar.refresh }
-        sleep 1
-      end
-    end
+    # Thread.new do
+    #   while true do
+    #     #@log.synchronize { @bar.refresh }
+    #     #sleep 1
+    #   end
+    # end
   end
 
   def progress=(p)
@@ -52,10 +52,14 @@ class SafeProgressBar
   def progress_mark=(p)
     @lock.synchronize { @bar.progress_mark = p }
   end
+
+  def finish
+    @lock.synchronize { @bar.finish }
+  end
 end
 
 $db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
-sha_tag         = /hash:sha1=(\h{40})/
+SHA_TAG          = /hash:sha1=(\h{40})/
 $min_upload_date = $db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
 STARTED_AT      = Time.now.to_i
 
@@ -141,7 +145,7 @@ end
 UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
   def upload
     size = Filesize.new(File.stat(photo).size).pretty
-    $progress.log("Uploading #{photo} #{size}")
+    #$progress.log("Uploading #{photo} #{size}")
     $progress.increment
     flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
                                 :is_public => 0,
@@ -159,8 +163,8 @@ NUM_PAGES  = (NUM_PHOTOS / PER_PAGE.to_f).ceil
 
 $progress = SafeProgressBar.new
 $progress.total = NUM_PAGES
-$progress.log("Starting downloads from #{Time.at($min_upload_date.to_i)}")
-$progress.title = "Downloading photos"
+$progress.log("Starting downloads from #{Time.at($min_upload_date.to_i)} num pages: #{NUM_PAGES}")
+$progress.title = "Downloading photo metadata"
 
 
 class Duplickatr < Thor
@@ -184,7 +188,7 @@ class Duplickatr < Thor
       break if photos.size == 0
 
       photos.each do |p|
-        hashes = p.machine_tags.split.map { |tag| sha_tag.match(tag) }
+        hashes = p.machine_tags.split.map { |tag| SHA_TAG.match(tag) }
         if hashes.empty?
           queued = queued + 1
           photo  = Photo.new(p.id, p.url_o, '')
@@ -193,55 +197,55 @@ class Duplickatr < Thor
         else
           begin
             photo = Photo.new(p.id, p.url_o, hashes.first[1])
-            @semaphore.synchronize { photo.store_metadata_in(db) }
+            @semaphore.synchronize { photo.store_metadata_in($db) }
          rescue Exception => e
             $progress.log("Something odd is up with this photo: #{e} #{p}")
          end
         end
       end
       $progress.increment
-      sleep 1
     end
 
     queue.join
-    queue           = WorkQueue.new(32)
-    $db['meta:min_upload_date'] = STARTED_AT
-    $progress.progress = 0
+
+    $progress.finish
     $progress.log("Download Complete. Download will start at #{Time.at(STARTED_AT)} next time")
 
-    exit
+    queue           = WorkQueue.new(32)
+    $db['meta:min_upload_date'] = STARTED_AT
+
+    $progress.progress = 0
+    $progress.total    = 0
 
     iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
-    count = 0
 
     $progress.log("Scanning iPhoto directory")
     files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
-    $progress.total = files.size
 
+    $progress.title = "Uploading photos"
 
     files.each do |path|
 
-      hash = db["file:#{path}"]
+      hash = $db["file:#{path}"]
       if hash.nil?
         $progress.log("Hashing local image file: #{path}")
         hash = sha1_digest_of(File.read(path))
         db["file:#{path}"] = hash
       end
           
-      existing = db["photo:sha1:#{hash}"]
+      existing = $db["photo:sha1:#{hash}"]
 
       if existing.nil?
-        job = UploadJob.new(@semaphore, queue, db, path, hash)
+        job = UploadJob.new(@semaphore, queue, $db, path, hash)
         queue.enqueue_b { job.upload }
-        count = count + 1
-      else
-        #puts("Found exiting tag for #{hash} - not uploading")
-        $progress.increment
       end
       
     end
 
+    $progress.total = queue.cur_tasks
+
     queue.join
+    $progress.finish
 
   end
 end
