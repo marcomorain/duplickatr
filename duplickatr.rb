@@ -10,9 +10,9 @@ require 'open-uri'
 require 'find'
 require 'filesize'
 require 'ruby-progressbar'
+require 'thor'
 
-
-per_page = 100
+PER_PAGE = 100
 jobs     = 0
 queued   = 0
 
@@ -27,6 +27,10 @@ class SafeProgressBar
         sleep 1
       end
     end
+  end
+
+  def progress=(p)
+    @lock.synchronize { @bar.progress = p }
   end
 
   def increment
@@ -50,31 +54,29 @@ class SafeProgressBar
   end
 end
 
-semaphore       = Mutex.new
-queue           = WorkQueue.new(32)
-db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
+$db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
 sha_tag         = /hash:sha1=(\h{40})/
-min_upload_date = db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
-started_at      = Time.now.to_i
+$min_upload_date = $db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
+STARTED_AT      = Time.now.to_i
 
 api_key       = '077eac1e7e41542df52529f8b749aaf2'
 secret_key    = '27eea421ceed4826'
-access_token  = db['meta:access_token']
-access_secret = db['meta:access_secret']
+access_token  = $db['meta:access_token']
+access_secret = $db['meta:access_secret']
 
 FlickRaw.api_key       = api_key
 FlickRaw.shared_secret = secret_key
 
 
-login = {}
+$login = {}
 
 unless access_token.nil?
   flickr.access_token  = access_token
   flickr.access_secret = access_secret
 
   # From here you are logged:
-  login = flickr.test.login
-  puts "You are now authenticated as #{login.username}"
+  $login = flickr.test.login
+  puts "You are now authenticated as #{$login.username}"
 else
   begin
     token = flickr.get_request_token
@@ -85,20 +87,16 @@ else
     verify = gets.strip
 
     flickr.get_access_token(token['oauth_token'], token['oauth_token_secret'], verify)
-    login = flickr.test.login
+    $login = flickr.test.login
 
-    db['meta:access_token']  = flickr.access_token
-    db['meta:access_secret'] = flickr.access_secret
+    $db['meta:access_token']  = flickr.access_token
+    $db['meta:access_secret'] = flickr.access_secret
     puts "You are now authenticated as #{login.username} with token " +
       "#{flickr.access_token} and secret #{flickr.access_secret}"
   rescue FlickRaw::FailedResponse => e
     puts "Authentication failed : #{e.msg}"
   end
 end
-
-$progress = SafeProgressBar.new
-
-$progress.log("Starting downloads from #{Time.at(min_upload_date.to_i)}")
 
 def make_hash_tag(hash)
   raise 'Unknown SHA1' if hash.empty?
@@ -153,79 +151,99 @@ UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
     
   end
 end
-count = 0
-$progress.title = "Downloading photos"
-for page in 1..500 do
 
-  $progress.log("Downloading photo metadata from #{per_page * (page-1)} to #{page * per_page}")
 
-  photos = semaphore.synchronize do
-    flickr.people.getPhotos(:user_id         => login.id,
-                            :extras          => 'tags,machine_tags,url_o',
-                            :page            => page,
-                            :per_page        => per_page,
-                            :min_upload_date => min_upload_date)
-  end
-  break if photos.size == 0
 
-  $progress.log("Downloaded data for #{photos.size} photos")
+NUM_PHOTOS = flickr.people.getInfo(:user_id => $login.id).photos.count
+NUM_PAGES  = (NUM_PHOTOS / PER_PAGE.to_f).ceil
 
-  photos.each do |p|
-    hashes = p.machine_tags.split.map { |tag| sha_tag.match(tag) }
-    if hashes.empty?
-      queued = queued + 1
-      photo  = Photo.new(p.id, p.url_o, '')
-      job    = DownloadJob.new(semaphore, queue, db, photo)
-      queue.enqueue_b { job.download }
-    else
-      begin
-        photo = Photo.new(p.id, p.url_o, hashes.first[1])
-        semaphore.synchronize { photo.store_metadata_in(db) }
-     rescue Exception => e
-        $progress.log("Something odd is up with this photo: #{e} #{p}")
-     end
-    end
-  end
-  count += photos.size
-end
-$progress.total = queued
-$progress.log("Total: #{count} to process: #{queued}")
-
-queue.join
-queue           = WorkQueue.new(32)
-db['meta:min_upload_date'] = started_at
 $progress = SafeProgressBar.new
-$progress.log("Download Complete. Download will start at #{Time.at(started_at)} next time")
-
-iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
-count = 0
-
-$progress.log("Scanning iPhoto directory")
-files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
-$progress.total = files.size
+$progress.total = NUM_PAGES
+$progress.log("Starting downloads from #{Time.at($min_upload_date.to_i)}")
+$progress.title = "Downloading photos"
 
 
-files.each do |path|
+class Duplickatr < Thor
 
-  hash = db["file:#{path}"]
-  if hash.nil?
-    $progress.log("Hashing local image file: #{path}")
-    hash = sha1_digest_of(File.read(path))
-    db["file:#{path}"] = hash
-  end
+  desc "hello NAME", "say hello to NAME"
+  def download(time=nil)
+
+    queue = WorkQueue.new(32)
+
+    @semaphore = Mutex.new
+
+    (1..NUM_PAGES).each do |page|
+
+      photos = @semaphore.synchronize do
+        flickr.people.getPhotos(:user_id         => $login.id,
+                                :extras          => 'tags,machine_tags,url_o',
+                                :page            => page,
+                                :per_page        => PER_PAGE,
+                                :min_upload_date => $min_upload_date)
+      end
+      break if photos.size == 0
+
+      photos.each do |p|
+        hashes = p.machine_tags.split.map { |tag| sha_tag.match(tag) }
+        if hashes.empty?
+          queued = queued + 1
+          photo  = Photo.new(p.id, p.url_o, '')
+          job    = DownloadJob.new(@semaphore, queue, db, photo)
+          queue.enqueue_b { job.download }
+        else
+          begin
+            photo = Photo.new(p.id, p.url_o, hashes.first[1])
+            @semaphore.synchronize { photo.store_metadata_in(db) }
+         rescue Exception => e
+            $progress.log("Something odd is up with this photo: #{e} #{p}")
+         end
+        end
+      end
+      $progress.increment
+      sleep 1
+    end
+
+    queue.join
+    queue           = WorkQueue.new(32)
+    $db['meta:min_upload_date'] = STARTED_AT
+    $progress.progress = 0
+    $progress.log("Download Complete. Download will start at #{Time.at(STARTED_AT)} next time")
+
+    exit
+
+    iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
+    count = 0
+
+    $progress.log("Scanning iPhoto directory")
+    files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
+    $progress.total = files.size
+
+
+    files.each do |path|
+
+      hash = db["file:#{path}"]
+      if hash.nil?
+        $progress.log("Hashing local image file: #{path}")
+        hash = sha1_digest_of(File.read(path))
+        db["file:#{path}"] = hash
+      end
+          
+      existing = db["photo:sha1:#{hash}"]
+
+      if existing.nil?
+        job = UploadJob.new(@semaphore, queue, db, path, hash)
+        queue.enqueue_b { job.upload }
+        count = count + 1
+      else
+        #puts("Found exiting tag for #{hash} - not uploading")
+        $progress.increment
+      end
       
-  existing = db["photo:sha1:#{hash}"]
+    end
 
-  if existing.nil?
-    job = UploadJob.new(semaphore, queue, db, path, hash)
-    queue.enqueue_b { job.upload }
-    count = count + 1
-  else
-    #puts("Found exiting tag for #{hash} - not uploading")
-    $progress.increment
+    queue.join
+
   end
-  
 end
 
-queue.join
-
+Duplickatr.start(ARGV)
