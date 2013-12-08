@@ -101,13 +101,18 @@ end
 
 UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
   def upload
-    size = Filesize.new(File.stat(photo).size).pretty
-    puts("Uploading #{photo} #{size}")
-    flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
-                                :is_public => 0,
-                                :is_friend => 0,
-                                :is_family => 1)
-    puts("#{photo} uploaded #{queue.cur_tasks} jobs remain on the queue")
+    begin
+      size = Filesize.new(File.stat(photo).size).pretty
+      puts("Uploading #{photo} #{size} #{queue.cur_tasks} jobs still on the queue")
+      flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
+                                  :is_public => 0,
+                                  :is_friend => 0,
+                                  :is_family => 1)
+      puts("#{photo} uploaded #{queue.cur_tasks} jobs remain on the queue")
+    rescue => e
+      puts("Error uploading")
+      puts(e)
+    end
     
   end
 end
@@ -163,7 +168,7 @@ class Duplickatr < Thor
 
     puts("Download Complete. Download will start at #{Time.at(STARTED_AT)} next time")
 
-    queue           = WorkQueue.new(32)
+    queue           = WorkQueue.new(2)
     $db['meta:min_upload_date'] = STARTED_AT
 
     iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
