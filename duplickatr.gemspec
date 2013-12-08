@@ -7,6 +7,6 @@ Gem::Specification.new do |s|
   s.authors     = ["Marc O'Morain"]
   s.email       = 'duplickator@marcomorain.com'
   s.files       = ["lib/duplickatr.rb"]
-  s.homepage    = 'https://github.com/marcomorain/duplickatr'
+  s.homepage    = 'http://github.com/marcomorain/duplickatr'
   s.license     = 'MIT'
 end
