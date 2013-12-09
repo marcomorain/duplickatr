@@ -152,7 +152,7 @@ UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
                                 :is_friend => 0,
                                 :is_family => 1)
     #$progress.log("#{photo} uploaded #{queue.cur_tasks} jobs remain on the queue")
-    
+
   end
 end
 
@@ -230,16 +230,16 @@ class Duplickatr < Thor
       if hash.nil?
         $progress.log("Hashing local image file: #{path}")
         hash = sha1_digest_of(File.read(path))
-        db["file:#{path}"] = hash
+        $db["file:#{path}"] = hash
       end
-          
+
       existing = $db["photo:sha1:#{hash}"]
 
       if existing.nil?
         job = UploadJob.new(@semaphore, queue, $db, path, hash)
         queue.enqueue_b { job.upload }
       end
-      
+
     end
 
     $progress.total = queue.cur_tasks
