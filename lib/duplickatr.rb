@@ -16,48 +16,6 @@ PER_PAGE = 500
 jobs     = 0
 queued   = 0
 
-class SafeProgressBar
-  def initialize()
-    @lock = Mutex.new
-    @bar  = ProgressBar.create(:format => '%a %B %p%% %t')
-
-    # Thread.new do
-    #   while true do
-    #     #@log.synchronize { @bar.refresh }
-    #     #sleep 1
-    #   end
-    # end
-  end
-
-  def progress=(p)
-    @lock.synchronize { @bar.progress = p }
-  end
-
-  def increment
-    @lock.synchronize { @bar.increment }
-  end
-
-  def title=(title)
-    @lock.synchronize { @bar.title = title }
-  end
-
-  def total=(total)
-    @lock.synchronize { @bar.total = total }
-  end
-
-  def log(s)
-    @lock.synchronize { @bar.log(s) }
-  end
-
-  def progress_mark=(p)
-    @lock.synchronize { @bar.progress_mark = p }
-  end
-
-  def finish
-    @lock.synchronize { @bar.finish }
-  end
-end
-
 $db              = LevelDB::DB.new File.join(File.expand_path('~'), '.duplickatr.ldb')
 SHA_TAG          = /hash:sha1=(\h{40})/
 $min_upload_date = $db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
@@ -134,25 +92,27 @@ DownloadJob = Struct.new(:semaphore, :queue, :db, :photo) do
                               :tags     => photo.hash_tag)
         photo.store_metadata_in(db)
       end
-      $progress.log("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}")
-      $progress.increment
+      puts("#{queue.cur_tasks} jobs remain on queue. Done #{photo.url} as #{photo.hash}")
     rescue Exception => e
-      $progress.log(e)
+      puts(e)
     end
   end
 end
 
 UploadJob = Struct.new(:semaphore, :queue, :db, :photo, :hash) do
   def upload
-    size = Filesize.new(File.stat(photo).size).pretty
-    #$progress.log("Uploading #{photo} #{size}")
-    $progress.increment
-    flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
-                                :is_public => 0,
-                                :is_friend => 0,
-                                :is_family => 1)
-    #$progress.log("#{photo} uploaded #{queue.cur_tasks} jobs remain on the queue")
-
+    begin
+      size = Filesize.new(File.stat(photo).size).pretty
+      puts("Uploading #{photo} #{size} #{queue.cur_tasks} jobs still on the queue")
+      flickr.upload_photo(photo,  :tags      => make_hash_tag(hash),
+                                  :is_public => 0,
+                                  :is_friend => 0,
+                                  :is_family => 1)
+      puts("#{photo} uploaded #{queue.cur_tasks} jobs remain on the queue")
+    rescue => e
+      puts("Error uploading")
+      puts(e)
+    end
   end
 end
 
@@ -161,10 +121,8 @@ end
 NUM_PHOTOS = flickr.people.getInfo(:user_id => $login.id).photos.count
 NUM_PAGES  = (NUM_PHOTOS / PER_PAGE.to_f).ceil
 
-$progress = SafeProgressBar.new
-$progress.total = NUM_PAGES
-$progress.log("Starting downloads from #{Time.at($min_upload_date.to_i)} num pages: #{NUM_PAGES}")
-$progress.title = "Downloading photo metadata"
+puts("Starting downloads from #{Time.at($min_upload_date.to_i)} num pages: #{NUM_PAGES}")
+puts("Downloading photo metadata")
 
 
 class Duplickatr < Thor
@@ -198,37 +156,32 @@ class Duplickatr < Thor
           begin
             photo = Photo.new(p.id, p.url_o, hashes.first[1])
             @semaphore.synchronize { photo.store_metadata_in($db) }
-         rescue Exception => e
-            $progress.log("Something odd is up with this photo: #{e} #{p}")
+          rescue Exception => e
+            puts("Something odd is up with this photo: #{e} #{p}")
          end
         end
       end
-      $progress.increment
     end
 
     queue.join
 
-    $progress.finish
-    $progress.log("Download Complete. Download will start at #{Time.at(STARTED_AT)} next time")
+    puts("Download Complete. Download will start at #{Time.at(STARTED_AT)} next time")
 
-    queue           = WorkQueue.new(32)
+    queue           = WorkQueue.new(2)
     $db['meta:min_upload_date'] = STARTED_AT
-
-    $progress.progress = 0
-    $progress.total    = 0
 
     iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
 
-    $progress.log("Scanning iPhoto directory")
+    puts("Scanning iPhoto directory")
     files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
 
-    $progress.title = "Uploading photos"
+    puts("Uploading photos")
 
     files.each do |path|
 
       hash = $db["file:#{path}"]
       if hash.nil?
-        $progress.log("Hashing local image file: #{path}")
+        puts("Hashing local image file: #{path}")
         hash = sha1_digest_of(File.read(path))
         $db["file:#{path}"] = hash
       end
@@ -242,10 +195,9 @@ class Duplickatr < Thor
 
     end
 
-    $progress.total = queue.cur_tasks
-
     queue.join
-    $progress.finish
+
+    puts("All photos uploaded.")
 
   end
 end
