@@ -7,7 +7,9 @@ Photo = Struct.new(:id, :url, :hash) do
     make_hash_tag(hash)
   end
 
-  def store_metadata_in(db)
-    db["photo:sha1:#{hash}"] = db["photo:id:#{id}"] = to_h
+  def store_metadata_in(db)    
+    puts("Storing id(#{id}) and sha1(#{hash}) as #{to_h}")
+    db["photo:id:#{id}"]     = to_h
+    db["photo:sha1:#{hash}"] = to_h
   end
 end

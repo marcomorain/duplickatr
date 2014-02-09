@@ -17,8 +17,8 @@ require 'duplickatr/photo'
 PER_PAGE = 500
 jobs     = 0
 
-SHA_TAG          = /hash:sha1=(\h{40})/
-STARTED_AT      = Time.now.to_i
+SHA_TAG    = /hash:sha1=(\h{40})/
+STARTED_AT = Time.now.to_i
 
 def make_hash_tag(hash)
   raise 'Unknown SHA1' if hash.empty?
@@ -36,17 +36,28 @@ class Flickr
   SECRET_KEY = '27eea421ceed4826'
 
   def initialize()
+    FlickRaw.api_key       = API_KEY
+    FlickRaw.shared_secret = SECRET_KEY
     @db = LevelDB::DB.new(database_path)
     @semaphore = Mutex.new
     @min_upload_date = @db['meta:min_upload_date'] ||= Time.new(2004, 2, 1).to_i
   end
 
+  def reset
+    puts("Deleting database")
+    @db.destroy!
+    exit
+  end
+
   def reconnect
+    
+
     access_token  = @db['meta:access_token']
     access_secret = @db['meta:access_secret']
 
-    FlickRaw.api_key       = API_KEY
-    FlickRaw.shared_secret = SECRET_KEY
+    return false if access_token.nil?
+
+    puts("Loaded credentials #{access_token} - #{access_secret}")
 
     flickr.access_token  = access_token
     flickr.access_secret = access_secret
@@ -65,9 +76,9 @@ class Flickr
       token = flickr.get_request_token
       auth_url = flickr.get_authorize_url(token['oauth_token'], :perms => 'delete')
 
-      puts "Open this url in your process to complete the authication process : #{auth_url}"
-      puts "Copy here the number given when you complete the process."
-      verify = gets.strip
+      question = "Open this url in your process to complete the authication process : #{auth_url}\n" +
+                 "Copy here the number given when you complete the process."
+      verify = yield(question).strip
 
       flickr.get_access_token(token['oauth_token'], token['oauth_token_secret'], verify)
       @login = flickr.test.login
@@ -109,10 +120,12 @@ class Flickr
       photos.each do |p|
         hashes = p.machine_tags.split.map { |tag| SHA_TAG.match(tag) }
         if hashes.empty?
-          photo  = Photo.new(p.id, p.url_o, '')
-          job    = DownloadJob.new(@semaphore, queue, @db, photo)
-          queue.enqueue_b { job.download }
+          puts("no flickr hash found locally for photo #{p}")
+          #photo  = Photo.new(p.id, p.url_o, '')
+          #job    = DownloadJob.new(@semaphore, queue, @db, photo)
+          #queue.enqueue_b { job.download }
         else
+          puts("hash was found locally for photo #{p}: #{hashes.first[1]}")
           begin
             photo = Photo.new(p.id, p.url_o, hashes.first[1])
             @semaphore.synchronize { photo.store_metadata_in(@db) }
@@ -149,8 +162,10 @@ class Flickr
       existing = @db["photo:sha1:#{hash}"]
 
       if existing.nil?
-        job = UploadJob.new(@semaphore, queue, @db, path, hash)
-        queue.enqueue_b { job.upload }
+        #job = UploadJob.new(@semaphore, queue, @db, path, hash)
+        #queue.enqueue_b { job.upload }
+      else
+        puts("No match found for #{path} #{hash} on Flickr")
       end
 
     end
