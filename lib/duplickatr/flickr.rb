@@ -78,6 +78,7 @@ class Flickr
 
       question = "Open this url in your process to complete the authication process : #{auth_url}\n" +
                  "Copy here the number given when you complete the process."
+      `open "#{auth_url}"`
       verify = yield(question).strip
 
       flickr.get_access_token(token['oauth_token'], token['oauth_token_secret'], verify)
@@ -145,12 +146,19 @@ class Flickr
 
     iphoto_masters = File.join(`defaults read com.apple.iPhoto RootDirectory`.strip, '/Masters/')
 
+    image_extensions = %w(.jpg .png)
+
     puts("Scanning iPhoto directory")
-    files = Find.find(iphoto_masters).reject {|f| FileTest.directory?(f) }.sort
+    files = Find.find(iphoto_masters)
+      .reject {|f| FileTest.directory?(f) }
+      .reject {|f| !image_extensions.include?(File.extname(f).downcase) }
+      .sort
 
     puts("Uploading photos")
 
     files.each do |path|
+
+
 
       hash = @db["file:#{path}"]
       if hash.nil?
@@ -162,10 +170,11 @@ class Flickr
       existing = @db["photo:sha1:#{hash}"]
 
       if existing.nil?
-        #job = UploadJob.new(@semaphore, queue, @db, path, hash)
-        #queue.enqueue_b { job.upload }
-      else
         puts("No match found for #{path} #{hash} on Flickr")
+        job = UploadJob.new(@semaphore, queue, @db, path, hash)
+        queue.enqueue_b { job.upload }
+      else
+        #puts("Found #{path}")
       end
 
     end
